@@ -26,7 +26,10 @@ import (
 	"github.com/gin-gonic/gin"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/utils/ptr"
 	"k8s.io/klog/v2"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -151,15 +154,32 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 		return nil, err
 	}
 
+	var ownerUID k8stypes.UID
+	var ownerAPIVersion, ownerKind, ownerName string
 	if sandboxClaim != nil {
-		if err := createSandboxClaim(ctx, dynamicClient, sandboxClaim); err != nil {
-			err = api.NewInternalError(fmt.Errorf("create sandbox claim %s/%s failed: %v", sandboxClaim.Namespace, sandboxClaim.Name, err))
-			return nil, err
+		uid, err := createSandboxClaim(ctx, dynamicClient, sandboxClaim)
+		if err != nil {
+			return nil, api.NewInternalError(fmt.Errorf("create sandbox claim %s/%s failed: %v", sandboxClaim.Namespace, sandboxClaim.Name, err))
 		}
+		ownerUID, ownerAPIVersion, ownerKind, ownerName = uid, "extensions.agents.x-k8s.io/v1alpha1", "SandboxClaim", sandboxClaim.Name
 	} else {
-		if _, err := createSandbox(ctx, dynamicClient, sandbox); err != nil {
+		info, err := createSandbox(ctx, dynamicClient, sandbox)
+		if err != nil {
 			return nil, api.NewInternalError(fmt.Errorf("failed to create sandbox: %w", err))
 		}
+		ownerUID, ownerAPIVersion, ownerKind, ownerName = info.UID, "agents.x-k8s.io/v1alpha1", "Sandbox", info.Name
+	}
+	// Attach OwnerReference so k8s GC can cascade-delete the NP if the owner
+	// is deleted out-of-band (e.g. kubectl delete sandbox). This is a safety net
+	// on top of the explicit cleanup in the delete handler and GC loop.
+	if networkPolicy != nil && ownerUID != "" {
+		networkPolicy.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion:         ownerAPIVersion,
+			Kind:               ownerKind,
+			Name:               ownerName,
+			UID:                ownerUID,
+			BlockOwnerDeletion: ptr.To(true),
+		}}
 	}
 
 	// Register rollback IMMEDIATELY after the sandbox/claim exists, before any

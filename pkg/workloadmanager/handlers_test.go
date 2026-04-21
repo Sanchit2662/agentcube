@@ -38,6 +38,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -209,12 +210,12 @@ func TestServerCreateSandbox(t *testing.T) {
 				return &SandboxInfo{Name: sandbox.Name, Namespace: sandbox.Namespace}, nil
 			})
 
-			patches.ApplyFunc(createSandboxClaim, func(_ context.Context, _ dynamic.Interface, _ *extensionsv1alpha1.SandboxClaim) error {
+			patches.ApplyFunc(createSandboxClaim, func(_ context.Context, _ dynamic.Interface, _ *extensionsv1alpha1.SandboxClaim) (k8stypes.UID, error) {
 				claimCalls++
 				if tt.createClaimErr != nil {
-					return tt.createClaimErr
+					return "", tt.createClaimErr
 				}
-				return nil
+				return "fake-claim-uid", nil
 			})
 
 			patches.ApplyFunc(deleteSandbox, func(_ context.Context, _ dynamic.Interface, _, _ string) error {

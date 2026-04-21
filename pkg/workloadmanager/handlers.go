@@ -29,8 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/utils/ptr"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -145,41 +145,51 @@ func (s *Server) handleSandboxCreate(c *gin.Context, kind string) {
 	respondJSON(c, http.StatusOK, response)
 }
 
+// createWorkload creates the Sandbox or SandboxClaim and, when a NetworkPolicy is provided,
+// wires the created object's UID into the NP's OwnerReferences so k8s GC can
+// cascade-delete the NP if the owner is removed out-of-band.
+func createWorkload(ctx context.Context, client dynamic.Interface, sandbox *sandboxv1alpha1.Sandbox, sandboxClaim *extensionsv1alpha1.SandboxClaim, networkPolicy *networkingv1.NetworkPolicy) error {
+	if sandboxClaim != nil {
+		uid, err := createSandboxClaim(ctx, client, sandboxClaim)
+		if err != nil {
+			return api.NewInternalError(fmt.Errorf("create sandbox claim %s/%s failed: %v", sandboxClaim.Namespace, sandboxClaim.Name, err))
+		}
+		setNetworkPolicyOwner(networkPolicy, "extensions.agents.x-k8s.io/v1alpha1", "SandboxClaim", sandboxClaim.Name, uid)
+		return nil
+	}
+	info, err := createSandbox(ctx, client, sandbox)
+	if err != nil {
+		return api.NewInternalError(fmt.Errorf("failed to create sandbox: %w", err))
+	}
+	setNetworkPolicyOwner(networkPolicy, "agents.x-k8s.io/v1alpha1", "Sandbox", info.Name, info.UID)
+	return nil
+}
+
+// setNetworkPolicyOwner attaches an OwnerReference to np pointing at the given owner.
+// No-op when np is nil or uid is empty.
+func setNetworkPolicyOwner(np *networkingv1.NetworkPolicy, apiVersion, kind, name string, uid k8stypes.UID) {
+	if np == nil || uid == "" {
+		return
+	}
+	np.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion:         apiVersion,
+		Kind:               kind,
+		Name:               name,
+		UID:                uid,
+		BlockOwnerDeletion: ptr.To(true),
+	}}
+}
+
 // createSandbox performs sandbox creation and returns the response payload or an error with an HTTP status code.
 func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interface, sandbox *sandboxv1alpha1.Sandbox, sandboxClaim *extensionsv1alpha1.SandboxClaim, networkPolicy *networkingv1.NetworkPolicy, sandboxEntry *sandboxEntry, resultChan <-chan SandboxStatusUpdate) (*types.CreateSandboxResponse, error) {
 	// Store placeholder before creating, make sandbox/sandboxClaim GarbageCollection possible
 	sandboxStorePlaceHolder := buildSandboxPlaceHolder(sandbox, sandboxEntry)
 	if err := s.storeClient.StoreSandbox(ctx, sandboxStorePlaceHolder); err != nil {
-		err = api.NewInternalError(fmt.Errorf("store sandbox placeholder failed: %v", err))
-		return nil, err
+		return nil, api.NewInternalError(fmt.Errorf("store sandbox placeholder failed: %v", err))
 	}
 
-	var ownerUID k8stypes.UID
-	var ownerAPIVersion, ownerKind, ownerName string
-	if sandboxClaim != nil {
-		uid, err := createSandboxClaim(ctx, dynamicClient, sandboxClaim)
-		if err != nil {
-			return nil, api.NewInternalError(fmt.Errorf("create sandbox claim %s/%s failed: %v", sandboxClaim.Namespace, sandboxClaim.Name, err))
-		}
-		ownerUID, ownerAPIVersion, ownerKind, ownerName = uid, "extensions.agents.x-k8s.io/v1alpha1", "SandboxClaim", sandboxClaim.Name
-	} else {
-		info, err := createSandbox(ctx, dynamicClient, sandbox)
-		if err != nil {
-			return nil, api.NewInternalError(fmt.Errorf("failed to create sandbox: %w", err))
-		}
-		ownerUID, ownerAPIVersion, ownerKind, ownerName = info.UID, "agents.x-k8s.io/v1alpha1", "Sandbox", info.Name
-	}
-	// Attach OwnerReference so k8s GC can cascade-delete the NP if the owner
-	// is deleted out-of-band (e.g. kubectl delete sandbox). This is a safety net
-	// on top of the explicit cleanup in the delete handler and GC loop.
-	if networkPolicy != nil && ownerUID != "" {
-		networkPolicy.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion:         ownerAPIVersion,
-			Kind:               ownerKind,
-			Name:               ownerName,
-			UID:                ownerUID,
-			BlockOwnerDeletion: ptr.To(true),
-		}}
+	if err := createWorkload(ctx, dynamicClient, sandbox, sandboxClaim, networkPolicy); err != nil {
+		return nil, err
 	}
 
 	// Register rollback IMMEDIATELY after the sandbox/claim exists, before any

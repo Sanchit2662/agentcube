@@ -179,6 +179,31 @@ func setNetworkPolicyOwner(np *networkingv1.NetworkPolicy, apiVersion, kind, nam
 	}}
 }
 
+// createNetworkPolicyAndWorkload creates the NetworkPolicy (if non-nil) before the
+// workload so the deny-all is in place before the CNI wires up the pod's network
+// interface. If workload creation fails, the NP is cleaned up inline — the rollback
+// defer in createSandbox is not yet registered at this point.
+// On success, setNetworkPolicyOwner has populated networkPolicy.OwnerReferences.
+func (s *Server) createNetworkPolicyAndWorkload(ctx context.Context, dynamicClient dynamic.Interface, sandbox *sandboxv1alpha1.Sandbox, sandboxClaim *extensionsv1alpha1.SandboxClaim, networkPolicy *networkingv1.NetworkPolicy) error {
+	if networkPolicy != nil {
+		if err := createNetworkPolicy(ctx, s.k8sClient.clientset, networkPolicy); err != nil {
+			return api.NewInternalError(err)
+		}
+	}
+	if err := createWorkload(ctx, dynamicClient, sandbox, sandboxClaim, networkPolicy); err != nil {
+		if networkPolicy != nil {
+			ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if delErr := deleteNetworkPolicy(ctxTimeout, s.k8sClient.clientset, networkPolicy.Namespace, networkPolicy.Name); delErr != nil {
+				klog.Warningf("NetworkPolicy %s/%s cleanup after workload create failure: %v",
+					networkPolicy.Namespace, networkPolicy.Name, delErr)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 // createSandbox performs sandbox creation and returns the response payload or an error with an HTTP status code.
 func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interface, sandbox *sandboxv1alpha1.Sandbox, sandboxClaim *extensionsv1alpha1.SandboxClaim, networkPolicy *networkingv1.NetworkPolicy, sandboxEntry *sandboxEntry, resultChan <-chan SandboxStatusUpdate) (*types.CreateSandboxResponse, error) {
 	// Store placeholder before creating, make sandbox/sandboxClaim GarbageCollection possible
@@ -187,12 +212,12 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 		return nil, api.NewInternalError(fmt.Errorf("store sandbox placeholder failed: %v", err))
 	}
 
-	if err := createWorkload(ctx, dynamicClient, sandbox, sandboxClaim, networkPolicy); err != nil {
+	if err := s.createNetworkPolicyAndWorkload(ctx, dynamicClient, sandbox, sandboxClaim, networkPolicy); err != nil {
 		return nil, err
 	}
 
 	// Register rollback IMMEDIATELY after the sandbox/claim exists, before any
-	// subsequent failure path (NetworkPolicy create, ready wait, entrypoint probe,
+	// subsequent failure path (NetworkPolicy patch, ready wait, entrypoint probe,
 	// store update). Rollback unconditionally attempts NP delete when networkPolicy
 	// is non-nil; delete is idempotent (NotFound is swallowed), which also covers
 	// the edge case where Create succeeded server-side but returned an error
@@ -205,11 +230,14 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 		s.sandboxRollback(sandboxClaim, dynamicClient, sandbox, networkPolicy, sandboxEntry)
 	}()
 
-	// Create NetworkPolicy if one was built from the template spec.
-	// Uses the workloadmanager's own client (not the user client) since NP is infra.
+	// Patch the already-created NP to add the OwnerReference now that we have the UID.
+	// Best-effort GC safety net: if the sandbox is deleted out-of-band, GC cascade-deletes
+	// the NP. Explicit deletion in handleDeleteSandbox covers the normal path, so a
+	// patch failure is logged but not fatal.
 	if networkPolicy != nil {
-		if err := createNetworkPolicy(ctx, s.k8sClient.clientset, networkPolicy); err != nil {
-			return nil, api.NewInternalError(err)
+		if err := patchNetworkPolicyOwner(ctx, s.k8sClient.clientset, networkPolicy); err != nil {
+			klog.Warningf("NetworkPolicy %s/%s owner patch failed, GC cascade will not apply: %v",
+				networkPolicy.Namespace, networkPolicy.Name, err)
 		}
 	}
 

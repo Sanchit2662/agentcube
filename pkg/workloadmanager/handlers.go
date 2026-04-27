@@ -149,6 +149,22 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 		return nil, err
 	}
 
+	// Register rollback IMMEDIATELY after the placeholder is committed, before
+	// any error-returning step (workload create, ready wait, pod-IP lookup,
+	// entrypoint probe, store update). Otherwise an early return from a failed
+	// Sandbox/SandboxClaim Create would leak the placeholder in the store until
+	// GC's idle-timeout window catches it. sandboxRollback is idempotent —
+	// delete{Sandbox,SandboxClaim} swallow NotFound and DeleteSandboxBySessionID
+	// is safe on a row that no longer exists, so this is safe to register before
+	// the workload itself is created.
+	needRollbackSandbox := true
+	defer func() {
+		if !needRollbackSandbox {
+			return
+		}
+		s.sandboxRollback(sandboxClaim, dynamicClient, sandbox, sandboxEntry)
+	}()
+
 	if sandboxClaim != nil {
 		if err := createSandboxClaim(ctx, dynamicClient, sandboxClaim); err != nil {
 			err = api.NewInternalError(fmt.Errorf("create sandbox claim %s/%s failed: %v", sandboxClaim.Namespace, sandboxClaim.Name, err))
@@ -159,17 +175,6 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 			return nil, api.NewInternalError(fmt.Errorf("failed to create sandbox: %w", err))
 		}
 	}
-
-	// Register rollback BEFORE waiting for the sandbox to become ready.
-	// This ensures the K8s resource and store placeholder are cleaned up on
-	// timeout, pod-IP failure, or store-update failure — not just on post-creation errors.
-	needRollbackSandbox := true
-	defer func() {
-		if !needRollbackSandbox {
-			return
-		}
-		s.sandboxRollback(sandboxClaim, dynamicClient, sandbox, sandboxEntry)
-	}()
 
 	var createdSandbox *sandboxv1alpha1.Sandbox
 	select {

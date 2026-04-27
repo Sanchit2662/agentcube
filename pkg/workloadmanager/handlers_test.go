@@ -44,10 +44,11 @@ import (
 
 type fakeStore struct {
 	store.Store
-	storeErr    error
-	updateErr   error
-	storeCalls  int
-	updateCalls int
+	storeErr           error
+	updateErr          error
+	storeCalls         int
+	updateCalls        int
+	deleteSessionCalls int
 }
 
 func (f *fakeStore) Ping(_ context.Context) error { return nil }
@@ -62,7 +63,10 @@ func (f *fakeStore) UpdateSandbox(_ context.Context, _ *types.SandboxInfo) error
 	f.updateCalls++
 	return f.updateErr
 }
-func (f *fakeStore) DeleteSandboxBySessionID(_ context.Context, _ string) error { return nil }
+func (f *fakeStore) DeleteSandboxBySessionID(_ context.Context, _ string) error {
+	f.deleteSessionCalls++
+	return nil
+}
 func (f *fakeStore) ListExpiredSandboxes(_ context.Context, _ time.Time, _ int64) ([]*types.SandboxInfo, error) {
 	return nil, nil
 }
@@ -102,20 +106,22 @@ func makeEntry() *sandboxEntry {
 
 func TestServerCreateSandbox(t *testing.T) {
 	tests := []struct {
-		name              string
-		sandboxClaim      bool
-		storeErr          error
-		createSandboxErr  error
-		createClaimErr    error
-		podIPErr          error
-		readyErr          error
-		updateErr         error
-		sendResult        bool
-		expectErr         bool
-		expectCreateCalls int
-		expectClaimCalls  int
-		expectDeleteCalls int
-		expectUpdateCalls int
+		name                   string
+		sandboxClaim           bool
+		storeErr               error
+		createSandboxErr       error
+		createClaimErr         error
+		podIPErr               error
+		readyErr               error
+		updateErr              error
+		sendResult             bool
+		expectErr              bool
+		expectCreateCalls      int
+		expectClaimCalls       int
+		expectDeleteCalls      int
+		expectClaimDeleteCalls int
+		expectStoreDeleteCalls int
+		expectUpdateCalls      int
 	}{
 		{
 			name:              "creates sandbox successfully",
@@ -136,42 +142,49 @@ func TestServerCreateSandbox(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name:              "sandbox creation fails",
-			createSandboxErr:  errors.New("create sandbox failed"),
-			expectErr:         true,
-			expectCreateCalls: 1,
+			name:                   "sandbox creation fails triggers rollback",
+			createSandboxErr:       errors.New("create sandbox failed"),
+			expectErr:              true,
+			expectCreateCalls:      1,
+			expectDeleteCalls:      1,
+			expectStoreDeleteCalls: 1,
 		},
 		{
-			name:             "sandbox claim creation fails",
-			sandboxClaim:     true,
-			createClaimErr:   errors.New("create claim failed"),
-			expectErr:        true,
-			expectClaimCalls: 1,
+			name:                   "sandbox claim creation fails triggers rollback",
+			sandboxClaim:           true,
+			createClaimErr:         errors.New("create claim failed"),
+			expectErr:              true,
+			expectClaimCalls:       1,
+			expectClaimDeleteCalls: 1,
+			expectStoreDeleteCalls: 1,
 		},
 		{
-			name:              "pod ip lookup fails triggers rollback",
-			podIPErr:          errors.New("pod ip missing"),
-			sendResult:        true,
-			expectErr:         true,
-			expectCreateCalls: 1,
-			expectDeleteCalls: 1,
+			name:                   "pod ip lookup fails triggers rollback",
+			podIPErr:               errors.New("pod ip missing"),
+			sendResult:             true,
+			expectErr:              true,
+			expectCreateCalls:      1,
+			expectDeleteCalls:      1,
+			expectStoreDeleteCalls: 1,
 		},
 		{
-			name:              "entrypoint readiness failure triggers rollback",
-			readyErr:          errors.New("connection refused"),
-			sendResult:        true,
-			expectErr:         true,
-			expectCreateCalls: 1,
-			expectDeleteCalls: 1,
+			name:                   "entrypoint readiness failure triggers rollback",
+			readyErr:               errors.New("connection refused"),
+			sendResult:             true,
+			expectErr:              true,
+			expectCreateCalls:      1,
+			expectDeleteCalls:      1,
+			expectStoreDeleteCalls: 1,
 		},
 		{
-			name:              "update store fails triggers rollback",
-			updateErr:         errors.New("update failed"),
-			sendResult:        true,
-			expectErr:         true,
-			expectCreateCalls: 1,
-			expectUpdateCalls: 1,
-			expectDeleteCalls: 1,
+			name:                   "update store fails triggers rollback",
+			updateErr:              errors.New("update failed"),
+			sendResult:             true,
+			expectErr:              true,
+			expectCreateCalls:      1,
+			expectUpdateCalls:      1,
+			expectDeleteCalls:      1,
+			expectStoreDeleteCalls: 1,
 		},
 	}
 
@@ -198,6 +211,7 @@ func TestServerCreateSandbox(t *testing.T) {
 			createCalls := 0
 			claimCalls := 0
 			deleteCalls := 0
+			claimDeleteCalls := 0
 
 			patches.ApplyFunc(createSandbox, func(_ context.Context, _ dynamic.Interface, sandbox *sandboxv1alpha1.Sandbox) (*SandboxInfo, error) {
 				createCalls++
@@ -220,6 +234,11 @@ func TestServerCreateSandbox(t *testing.T) {
 				return nil
 			})
 
+			patches.ApplyFunc(deleteSandboxClaim, func(_ context.Context, _ dynamic.Interface, _, _ string) error {
+				claimDeleteCalls++
+				return nil
+			})
+
 			patches.ApplyMethod(reflect.TypeOf((*K8sClient)(nil)), "GetSandboxPodIP", func(_ *K8sClient, _ context.Context, _, _, _ string) (string, error) {
 				if tt.podIPErr != nil {
 					return "", tt.podIPErr
@@ -236,8 +255,10 @@ func TestServerCreateSandbox(t *testing.T) {
 			require.Equal(t, tt.expectCreateCalls, createCalls, "createSandbox call count")
 			require.Equal(t, tt.expectClaimCalls, claimCalls, "createSandboxClaim call count")
 			require.Equal(t, tt.expectDeleteCalls, deleteCalls, "deleteSandbox call count")
+			require.Equal(t, tt.expectClaimDeleteCalls, claimDeleteCalls, "deleteSandboxClaim call count")
 			require.Equal(t, 1, store.storeCalls, "StoreSandbox call count")
 			require.Equal(t, tt.expectUpdateCalls, store.updateCalls, "UpdateSandbox call count")
+			require.Equal(t, tt.expectStoreDeleteCalls, store.deleteSessionCalls, "DeleteSandboxBySessionID call count")
 
 			if tt.expectErr {
 				require.Error(t, err)

@@ -149,14 +149,8 @@ func (s *Server) createSandbox(ctx context.Context, dynamicClient dynamic.Interf
 		return nil, err
 	}
 
-	// Register rollback IMMEDIATELY after the placeholder is committed, before
-	// any error-returning step (workload create, ready wait, pod-IP lookup,
-	// entrypoint probe, store update). Otherwise an early return from a failed
-	// Sandbox/SandboxClaim Create would leak the placeholder in the store until
-	// GC's idle-timeout window catches it. sandboxRollback is idempotent —
-	// delete{Sandbox,SandboxClaim} swallow NotFound and DeleteSandboxBySessionID
-	// is safe on a row that no longer exists, so this is safe to register before
-	// the workload itself is created.
+	// Register rollback right after the placeholder is stored; sandboxRollback
+	// is safe to run before the workload exists because deletes ignore NotFound.
 	needRollbackSandbox := true
 	defer func() {
 		if !needRollbackSandbox {

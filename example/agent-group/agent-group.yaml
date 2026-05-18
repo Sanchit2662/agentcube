@@ -1,0 +1,59 @@
+# Multi-AgentCube proof of concept (issue volcano-sh/agentcube#301).
+#
+# Apply this manifest to launch a two-agent fleet. The AgentGroupController
+# creates one agent-sandbox Sandbox per agent, then reports fleet readiness:
+#
+#   kubectl apply -f example/agent-group/agent-group.yaml
+#   kubectl get agentgroup research-task -w
+#   # Pending -> Initializing -> Running
+#   kubectl get sandboxes -l runtime.agentcube.io/agent-group=research-task
+#
+# Both agents reference the same CodeInterpreter runtime below; a real
+# deployment may point each agent at a differently specialised runtime.
+---
+apiVersion: runtime.agentcube.volcano.sh/v1alpha1
+kind: CodeInterpreter
+metadata:
+  name: poc-interpreter
+  namespace: default
+spec:
+  ports:
+    - pathPrefix: "/"
+      port: 8080
+      protocol: "HTTP"
+  template:
+    image: ghcr.io/volcano-sh/picod:latest
+    imagePullPolicy: IfNotPresent
+    args:
+      - --workspace=/root
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+  sessionTimeout: "15m"
+  maxSessionDuration: "8h"
+---
+apiVersion: runtime.agentcube.volcano.sh/v1alpha1
+kind: AgentGroup
+metadata:
+  name: research-task
+  namespace: default
+spec:
+  topology: Hierarchical
+  failurePolicy: FailFast
+  agents:
+    - name: planner
+      role: planner
+      replicas: 1
+      runtimeRef:
+        kind: CodeInterpreter
+        name: poc-interpreter
+    - name: executor
+      role: executor
+      replicas: 1
+      runtimeRef:
+        kind: CodeInterpreter
+        name: poc-interpreter

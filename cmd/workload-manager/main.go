@@ -37,6 +37,7 @@ import (
 
 	runtimev1alpha1 "github.com/volcano-sh/agentcube/pkg/apis/runtime/v1alpha1"
 	"github.com/volcano-sh/agentcube/pkg/workloadmanager"
+	"github.com/volcano-sh/agentcube/pkg/workloadmanager/agentgroup"
 )
 
 var (
@@ -177,6 +178,15 @@ func setupControllers(mgr ctrl.Manager, sandboxReconciler *workloadmanager.Sandb
 	// Setup CodeInterpreter controller.
 	if err := codeInterpreterReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create codeinterpreter controller: %w", err)
+	}
+
+	// Setup AgentGroup orchestrator controller (multi-agent capability, PoC).
+	agentGroupController := &agentgroup.AgentGroupController{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	if err := agentGroupController.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create agentgroup controller: %w", err)
 	}
 
 	return nil

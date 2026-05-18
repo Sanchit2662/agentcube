@@ -100,6 +100,13 @@ func (c *AgentGroupController) Reconcile(ctx context.Context, req ctrl.Request) 
 // reconcilePending validates the spec and admits the group to Initializing.
 func (c *AgentGroupController) reconcilePending(ctx context.Context,
 	ag *runtimev1alpha1.AgentGroup) (ctrl.Result, error) {
+	// The PoC implements only the Hierarchical topology. Peer is accepted by
+	// the CRD enum but not yet implemented, so reject it explicitly rather
+	// than treating it as a silent no-op.
+	if ag.Spec.Topology == runtimev1alpha1.TopologyPeer {
+		return ctrl.Result{}, c.fail(ctx, ag, "UnsupportedTopology",
+			"Peer topology is not implemented yet; use Hierarchical")
+	}
 	if err := validateSpec(ag); err != nil {
 		return ctrl.Result{}, c.fail(ctx, ag, "InvalidSpec", err.Error())
 	}
@@ -319,6 +326,20 @@ func validateSpec(ag *runtimev1alpha1.AgentGroup) error {
 		seen[agent.Name] = struct{}{}
 		if agent.RuntimeRef.Name == "" {
 			return fmt.Errorf("agent %q: runtimeRef.name must not be empty", agent.Name)
+		}
+	}
+	// Every dependency edge must reference agents that actually exist. The
+	// controller does not yet order startup by these edges, but the edges are
+	// part of the API contract, so an invalid graph is rejected up front.
+	for _, dep := range ag.Spec.Dependencies {
+		if _, ok := seen[dep.From]; !ok {
+			return fmt.Errorf("dependency references unknown agent %q", dep.From)
+		}
+		if _, ok := seen[dep.To]; !ok {
+			return fmt.Errorf("dependency references unknown agent %q", dep.To)
+		}
+		if dep.From == dep.To {
+			return fmt.Errorf("dependency from %q to itself is not allowed", dep.From)
 		}
 	}
 	return nil

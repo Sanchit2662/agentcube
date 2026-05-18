@@ -185,6 +185,30 @@ func TestAgentGroupReconcile(t *testing.T) {
 			wantTotal:      1,
 			wantConditionR: metav1.ConditionFalse,
 		},
+		{
+			name:        "Peer topology is rejected as Failed",
+			seedRuntime: true,
+			group: func() *runtimev1alpha1.AgentGroup {
+				g := mkGroup("g-peer", "ci", "planner", "executor")
+				g.Spec.Topology = runtimev1alpha1.TopologyPeer
+				return g
+			}(),
+			wantPhase:      runtimev1alpha1.AgentGroupFailed,
+			wantConditionR: metav1.ConditionFalse,
+		},
+		{
+			name:        "dependency on an unknown agent fails the group",
+			seedRuntime: true,
+			group: func() *runtimev1alpha1.AgentGroup {
+				g := mkGroup("g-baddep", "ci", "planner", "executor")
+				g.Spec.Dependencies = []runtimev1alpha1.AgentDependency{
+					{From: "planner", To: "ghost"},
+				}
+				return g
+			}(),
+			wantPhase:      runtimev1alpha1.AgentGroupFailed,
+			wantConditionR: metav1.ConditionFalse,
+		},
 	}
 
 	for _, tc := range tests {
@@ -275,6 +299,27 @@ func TestAgentGroupCreatesOwnedSandboxes(t *testing.T) {
 	}
 }
 
+// TestAgentGroupRejectsPeerTopology verifies that a Peer-topology group fails
+// with the UnsupportedTopology reason rather than being silently accepted.
+func TestAgentGroupRejectsPeerTopology(t *testing.T) {
+	scheme := newScheme(t)
+	ag := mkGroup("g-peer-reason", "ci", "planner")
+	ag.Spec.Topology = runtimev1alpha1.TopologyPeer
+
+	cl := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ag, mkCodeInterpreter("ci")).
+		WithStatusSubresource(&runtimev1alpha1.AgentGroup{}).
+		Build()
+	c := &AgentGroupController{Client: cl, Scheme: scheme}
+
+	got := drive(t, c, cl, ag)
+	assert.Equal(t, runtimev1alpha1.AgentGroupFailed, got.Status.Phase)
+	cond := findCondition(got.Status.Conditions, conditionReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, "UnsupportedTopology", cond.Reason)
+}
+
 func TestValidateSpec(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -289,6 +334,33 @@ func TestValidateSpec(t *testing.T) {
 			group: func() *runtimev1alpha1.AgentGroup {
 				g := mkGroup("g", "ci", "a")
 				g.Spec.Agents[0].RuntimeRef.Name = ""
+				return g
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "valid dependency edge",
+			group: func() *runtimev1alpha1.AgentGroup {
+				g := mkGroup("g", "ci", "a", "b")
+				g.Spec.Dependencies = []runtimev1alpha1.AgentDependency{{From: "a", To: "b"}}
+				return g
+			}(),
+			wantErr: false,
+		},
+		{
+			name: "dependency to unknown agent",
+			group: func() *runtimev1alpha1.AgentGroup {
+				g := mkGroup("g", "ci", "a", "b")
+				g.Spec.Dependencies = []runtimev1alpha1.AgentDependency{{From: "a", To: "ghost"}}
+				return g
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "dependency from an agent to itself",
+			group: func() *runtimev1alpha1.AgentGroup {
+				g := mkGroup("g", "ci", "a", "b")
+				g.Spec.Dependencies = []runtimev1alpha1.AgentDependency{{From: "a", To: "a"}}
 				return g
 			}(),
 			wantErr: true,

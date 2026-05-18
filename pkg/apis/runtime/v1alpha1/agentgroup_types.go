@@ -69,6 +69,19 @@ type RuntimeReference struct {
 	Name string `json:"name"`
 }
 
+// AgentDependency is a directed edge in the agent graph: the From agent must
+// reach Running before the To agent starts. It is only meaningful for the
+// Hierarchical topology. The proof-of-concept controller validates these edges
+// but brings the whole fleet up together; ordered startup is later work.
+type AgentDependency struct {
+	// From is the AgentSpec.Name of the upstream agent.
+	// +kubebuilder:validation:Required
+	From string `json:"from"`
+	// To is the AgentSpec.Name of the downstream agent.
+	// +kubebuilder:validation:Required
+	To string `json:"to"`
+}
+
 // AgentSpec declares one member of the agent fleet.
 type AgentSpec struct {
 	// Name uniquely identifies this agent within the AgentGroup.
@@ -101,6 +114,13 @@ type AgentGroupSpec struct {
 	// Agents is the fleet definition. At least one agent is required.
 	// +kubebuilder:validation:MinItems=1
 	Agents []AgentSpec `json:"agents"`
+
+	// Dependencies are directed edges between agents for the Hierarchical
+	// topology: the From agent must reach Running before the To agent starts.
+	// The proof-of-concept controller validates these edges but brings the
+	// whole fleet up together; ordered startup is later work.
+	// +optional
+	Dependencies []AgentDependency `json:"dependencies,omitempty"`
 
 	// FailurePolicy controls per-agent failure handling. The PoC implements
 	// FailFast; the other values are accepted but treated as FailFast.

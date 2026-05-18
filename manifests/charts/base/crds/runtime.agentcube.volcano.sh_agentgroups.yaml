@@ -106,6 +106,30 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              dependencies:
+                description: |-
+                  Dependencies are directed edges between agents for the Hierarchical
+                  topology: the From agent must reach Running before the To agent starts.
+                  The proof-of-concept controller validates these edges but brings the
+                  whole fleet up together; ordered startup is later work.
+                items:
+                  description: |-
+                    AgentDependency is a directed edge in the agent graph: the From agent must
+                    reach Running before the To agent starts. It is only meaningful for the
+                    Hierarchical topology. The proof-of-concept controller validates these edges
+                    but brings the whole fleet up together; ordered startup is later work.
+                  properties:
+                    from:
+                      description: From is the AgentSpec.Name of the upstream agent.
+                      type: string
+                    to:
+                      description: To is the AgentSpec.Name of the downstream agent.
+                      type: string
+                  required:
+                  - from
+                  - to
+                  type: object
+                type: array
               failurePolicy:
                 default: FailFast
                 description: |-
